@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+data/
+.venv/
+build/
+dist/
+heyallm/static/*.map
+.DS_Store

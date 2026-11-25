@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>HeyAllM</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ===================== sidebar: scenes + global actions ===================== -->
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <span class="brand">Hey<span>All</span>M</span>
+        <div class="sidebar-actions">
+          <button id="btn-new-scene" class="icon-btn" type="button" title="New scene" aria-label="New scene">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button id="btn-settings" class="icon-btn" type="button" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </div>
+      <nav id="scene-list" aria-label="Scenes"></nav>
+    </aside>
+
+    <!-- ===================== main: header / stream / composer ===================== -->
+    <main id="main">
+      <header id="chat-header">
+        <div id="header-chars" class="header-chars"><!-- built by JS --></div>
+        <div id="status-pill" class="status-pill" aria-live="polite"></div>
+        <div class="header-controls">
+          <button id="btn-start-stop" class="btn control" type="button" aria-label="Start or stop the scene">
+            <svg class="ic ic-play" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><polygon points="6 4 20 12 6 20" fill="currentColor"/></svg>
+            <svg class="ic ic-stop" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+            <span id="start-stop-label">Start</span>
+          </button>
+          <button id="btn-step" class="btn control" type="button" title="Advance exactly one turn">Step</button>
+          <button id="btn-compact" class="btn control" type="button" title="Compact scene memory">Compact</button>
+          <button id="btn-delete-scene" class="icon-btn danger" type="button" title="Delete scene" aria-label="Delete scene">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="empty-state" class="empty-state hidden"><!-- built by JS --></div>
+
+      <section id="stream" aria-label="Message stream"><!-- events appended by JS --></section>
+
+      <form id="composer" autocomplete="off">
+        <textarea id="composer-text" rows="1" placeholder="Interject into the scene…" aria-label="Interjection text" disabled></textarea>
+        <button id="btn-send" class="icon-btn send" type="submit" title="Send" aria-label="Send interjection" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+        </button>
+      </form>
+    </main>
+  </div>
+
+  <!-- ===================== toasts ===================== -->
+  <div id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ===================== new scene modal ===================== -->
+  <div class="modal hidden" id="modal-new-scene" role="dialog" aria-modal="true" aria-labelledby="new-scene-title">
+    <div class="modal-card narrow">
+      <div class="modal-head">
+        <h2 id="new-scene-title">New scene</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Close dialog">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="form-new-scene">
+        <div class="modal-body">
+          <label class="field">
+            <span class="field-label">Character A (left)</span>
+            <select id="ns-char-a" required></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Character B (right)</span>
+            <select id="ns-char-b" required></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Title</span>
+            <input type="text" id="ns-title" placeholder="The lighthouse" />
+          </label>
+          <label class="field">
+            <span class="field-label">Setting</span>
+            <textarea id="ns-setting" rows="3" placeholder="A lighthouse stairwell, 3am, storm outside"></textarea>
+          </label>
+          <p id="ns-error" class="error-text hidden" role="alert"></p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" type="button" data-close>Cancel</button>
+          <button class="btn primary" type="submit" id="ns-submit">Create scene</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===================== settings modal ===================== -->
+  <div class="modal hidden" id="modal-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="settings-title">Settings</h2>
+        <div class="head-actions">
+          <button id="btn-new-char" class="btn" type="button">＋ New character</button>
+          <button class="icon-btn" type="button" data-close aria-label="Close settings">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- inline "new character" form (slow director call) -->
+      <form id="new-char-form" class="hidden">
+        <div class="modal-body sub">
+          <p class="muted">The director will invent a screenname, real name, demographics and persona from your seed. This makes one slow model call.</p>
+          <div class="panel-grid">
+            <label class="field"><span class="field-label">Seed / prompt extra (optional)</span>
+              <textarea id="nc-seed" rows="2" placeholder="e.g. a jaded lighthouse keeper who fears the sea"></textarea>
+            </label>
+            <label class="field"><span class="field-label">Base URL</span>
+              <input type="text" id="nc-base-url" placeholder="http://127.0.0.1:8080/v1" />
+            </label>
+            <label class="field"><span class="field-label">Model</span>
+              <input type="text" id="nc-model" placeholder="qwen2.5-7b-instruct" />
+            </label>
+            <label class="field"><span class="field-label">Timeout (s)</span>
+              <input type="number" id="nc-timeout" step="0.1" min="1" value="180" />
+            </label>
+          </div>
+          <p id="nc-status" class="muted" aria-live="polite"></p>
+          <div class="panel-actions">
+            <button class="btn" type="button" id="nc-cancel">Cancel</button>
+            <button class="btn primary" type="submit" id="nc-submit">Generate character</button>
+          </div>
+        </div>
+      </form>
+
+      <div id="settings-tabs" class="tabs" role="tablist" aria-label="Settings sections"><!-- built by JS --></div>
+      <div id="settings-body" class="modal-body"><!-- built by JS --></div>
+
+      <div class="modal-foot">
+        <span id="settings-status" class="status-text" aria-live="polite"></span>
+        <button class="btn" type="button" data-close>Close</button>
+        <button class="btn primary" type="button" id="btn-save-settings">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
