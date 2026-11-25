@@ -11,14 +11,17 @@ import argparse
 import json
 import logging
 import queue
+import shutil
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import __version__, director as director_mod
 from .config import Config, Character, Endpoint, blank_character, new_id
+from .creative import CreativeToolbox
 from .engine import END_NATURAL, SceneEngine
 from .llm import LLMClient, LLMError
 from .memory import Chronicle, compact as compact_chronicle
@@ -43,12 +46,21 @@ class SceneBusyError(RuntimeError):
     """A scene operation cannot proceed until an in-flight turn finishes."""
 
 
+class _SceneOperation:
+    def __init__(self) -> None:
+        self.active = 0
+        self.deleting = False
+
+
 class App:
     """Everything the handlers need, shared across request threads."""
 
     def __init__(self, data_dir: str | Path | None = None, config: Config | None = None) -> None:
         self.config = config or Config.load(data_dir)
         self.llm = LLMClient()
+        self.creative = CreativeToolbox(self.config.data_dir)
+        self._scene_creative: dict[str, CreativeToolbox] = {}
+        self._scene_ops: dict[str, _SceneOperation] = {}
         self.engines: dict[str, SceneEngine] = {}
         self.active_scene_id: str | None = None
         self._subs: dict[str, list[queue.Queue]] = {}
@@ -110,6 +122,64 @@ class App:
             out.append(meta)
         return out
 
+    @contextmanager
+    def _scene_operation(self, scene_id: str) -> Iterator[None]:
+        """Register director work so deletion cannot race its persistence."""
+        with self._lock:
+            operation = self._scene_ops.setdefault(scene_id, _SceneOperation())
+            if operation.deleting:
+                raise SceneBusyError("Scene is being deleted")
+            operation.active += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                operation.active -= 1
+                if (
+                    operation.active == 0
+                    and not operation.deleting
+                    and self._scene_meta(scene_id) is None
+                ):
+                    self._scene_ops.pop(scene_id, None)
+
+    def _creative_path(self, scene_id: str) -> Path:
+        if (
+            not isinstance(scene_id, str)
+            or not scene_id
+            or scene_id in {".", ".."}
+            or "/" in scene_id
+            or "\\" in scene_id
+            or Path(scene_id).name != scene_id
+        ):
+            raise ValueError("Invalid scene id")
+        base = (self.config.creative_dir / "scenes").resolve()
+        target = (base / scene_id).resolve()
+        if target.parent != base:
+            raise ValueError("Invalid scene id")
+        return target
+
+    def _creative_for(self, scene_id: str) -> CreativeToolbox:
+        self._creative_path(scene_id)  # validate before constructing a namespace
+        with self._lock:
+            toolbox = self._scene_creative.get(scene_id)
+            if toolbox is None:
+                toolbox = CreativeToolbox(self.config.data_dir, namespace=f"scenes/{scene_id}")
+                self._scene_creative[scene_id] = toolbox
+            return toolbox
+
+    def _director_complete(
+        self, endpoint: Endpoint, messages: list[dict], *, scene_id: str | None = None, **kwargs,
+    ):
+        toolbox = self._creative_for(scene_id) if scene_id else self.creative
+        return director_mod.complete(
+            self.llm,
+            endpoint,
+            messages,
+            creative=toolbox if self.config.creative.enabled else None,
+            max_tool_calls=self.config.creative.max_tool_calls,
+            **kwargs,
+        )
+
     # ----------------------------------------------------------- characters
     def create_character(self, body: dict) -> Character:
         seed = str(body.get("prompt_extra") or "")
@@ -123,6 +193,8 @@ class App:
                 self.config.director,
                 seed=seed,
                 character_endpoint=endpoint,
+                creative=self.creative if self.config.creative.enabled else None,
+                max_tool_calls=self.config.creative.max_tool_calls,
             )
             director_mod.apply_to_character(character, filled)
 
@@ -157,6 +229,8 @@ class App:
             self.config.director,
             seed=character.prompt_extra,
             character_endpoint=character.endpoint,
+            creative=self.creative if self.config.creative.enabled else None,
+            max_tool_calls=self.config.creative.max_tool_calls,
         )
         with self.config.lock:
             if self.config.get_character(char_id) is None:
@@ -179,7 +253,7 @@ class App:
         with self.config.lock:
             if isinstance(raw.get("director"), dict):
                 self.config.director = Endpoint.from_dict(raw["director"])
-            for field_name in ("cooldown", "engine", "narration", "memory"):
+            for field_name in ("cooldown", "engine", "narration", "memory", "creative"):
                 if isinstance(raw.get(field_name), dict):
                     setattr(
                         self.config,
@@ -256,6 +330,10 @@ class App:
         }
 
     def add_narration(self, scene_id: str, text: str) -> Event | None:
+        with self._scene_operation(scene_id):
+            return self._add_narration(scene_id, text)
+
+    def _add_narration(self, scene_id: str, text: str) -> Event | None:
         if self._scene_meta(scene_id) is None:
             return None
         transcript = self._transcript(scene_id)
@@ -266,6 +344,10 @@ class App:
         return event
 
     def narrate(self, scene_id: str, hint: str = "") -> Event:
+        with self._scene_operation(scene_id):
+            return self._narrate(scene_id, hint)
+
+    def _narrate(self, scene_id: str, hint: str = "") -> Event:
         """The director takes a turn as the narrator of the scene.
 
         Anything the third model says arrives as narration, exactly like the
@@ -294,9 +376,10 @@ class App:
         if hint.strip():
             prompt += "\n\nDirection to follow: " + hint.strip()
 
-        result = self.llm.chat(
+        result = self._director_complete(
             self.config.director,
             [{"role": "user", "content": prompt}],
+            scene_id=scene_id,
             temperature=0.95,
             max_tokens=220,
             timeout=(10, 120),
@@ -411,30 +494,52 @@ class App:
             return engine.step()
 
     def delete_scene(self, scene_id: str) -> bool:
-        engine = self.engines.get(scene_id)
-        if engine:
-            engine.stop()
         with self._lifecycle_lock:
-            engine = self.engines.get(scene_id)
-            if engine:
-                engine.join(timeout=5)
-                if engine.running:
-                    raise SceneBusyError("Scene is still stopping; try again in a moment")
+            # Existence is checked before touching any path derived from the id.
+            if self._scene_meta(scene_id) is None:
+                return False
+            creative_path = self._creative_path(scene_id)
             with self._lock:
-                self.engines.pop(scene_id, None)
-                self._transcripts.pop(scene_id, None)
-            if self.active_scene_id == scene_id:
-                self.active_scene_id = None
-            with self._memory_lock:
-                removed = delete_scene_files(self.config.scenes_dir, scene_id)
-                try:
-                    self.config.record_path(scene_id).unlink()
-                except FileNotFoundError:
-                    pass
-            return removed
+                operation = self._scene_ops.setdefault(scene_id, _SceneOperation())
+                if operation.active:
+                    raise SceneBusyError("A director request is still using this scene")
+                operation.deleting = True
+            try:
+                engine = self.engines.get(scene_id)
+                if engine:
+                    engine.stop()
+                    engine.join(timeout=5)
+                    if engine.running:
+                        raise SceneBusyError("Scene is still stopping; try again in a moment")
+                with self._lock:
+                    self.engines.pop(scene_id, None)
+                    self._transcripts.pop(scene_id, None)
+                    self._scene_creative.pop(scene_id, None)
+                if self.active_scene_id == scene_id:
+                    self.active_scene_id = None
+                with self._memory_lock:
+                    removed = delete_scene_files(self.config.scenes_dir, scene_id)
+                    try:
+                        self.config.record_path(scene_id).unlink()
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        shutil.rmtree(creative_path)
+                    except FileNotFoundError:
+                        pass
+                with self._lock:
+                    self._scene_ops.pop(scene_id, None)
+                return removed
+            finally:
+                with self._lock:
+                    operation.deleting = False
 
     # --------------------------------------------------------------- memory
     def compact_scene(self, scene_id: str) -> str:
+        with self._scene_operation(scene_id):
+            return self._compact_scene(scene_id)
+
+    def _compact_scene(self, scene_id: str) -> str:
         with self._memory_lock:
             meta = self._scene_meta(scene_id)
             if meta is None:
@@ -448,7 +553,10 @@ class App:
 
             characters = {c.id: c for c in self.config.characters}
             text = compact_chronicle(
-                self.llm, self.config.director, chronicle, pending, characters
+                self.llm, self.config.director, chronicle, pending, characters,
+                chat_fn=lambda endpoint, messages, **kwargs: self._director_complete(
+                    endpoint, messages, scene_id=scene_id, **kwargs,
+                ),
             )
             chronicle.text = text
             chronicle.scene_id = scene_id
@@ -477,6 +585,13 @@ class App:
             raise
 
     def _auto_compact(self, scene_id: str) -> None:
+        try:
+            with self._scene_operation(scene_id):
+                self._auto_compact_locked(scene_id)
+        except SceneBusyError:
+            return
+
+    def _auto_compact_locked(self, scene_id: str) -> None:
         failed = False
         try:
             while True:
@@ -810,6 +925,9 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
                     except SceneBusyError as exc:
                         self._send_error_json(str(exc), 409)
                         return
+                    except ValueError as exc:
+                        self._send_error_json(str(exc), 400)
+                        return
                     self._send_json({"ok": ok}, 200 if ok else 404)
                     return
                 self._send_error_json("Not found", 404)
@@ -832,6 +950,7 @@ def serve(
         raise ValueError(application.config.load_error)
     application.config.scenes_dir.mkdir(parents=True, exist_ok=True)
     application.config.memory_dir.mkdir(parents=True, exist_ok=True)
+    application.config.creative_dir.mkdir(parents=True, exist_ok=True)
     application.config.save()
     # A persisted "running" flag has no worker after a restart or crash.
     for meta in load_scene_meta(application.config.scenes_dir):
@@ -865,7 +984,7 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, ValueError) as exc:
         parser.exit(1, f"heyallm: {exc}\n")
     log.info(
-        "HeyAllM on http://127.0.0:%d  data=%s  characters=%d",
+        "HeyAllM on http://127.0.0.1:%d  data=%s  characters=%d",
         args.port, application.config.data_dir, len(application.config.characters),
     )
     try:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 from heyallm.llm import LLMClient, LLMResult
 
 
@@ -15,7 +17,7 @@ class FakeLLM(LLMClient):
         self.calls: list[dict] = []
 
     def chat(self, endpoint, messages, **kwargs):
-        self.calls.append({"endpoint": endpoint, "messages": messages, **kwargs})
+        self.calls.append({"endpoint": endpoint, "messages": copy.deepcopy(messages), **kwargs})
         if self.responses is None:
             text = self.default
         elif not self.responses:

@@ -92,7 +92,7 @@ class Endpoint:
     values is the single-llama.cpp-routing-server case.
     """
 
-    base_url: str = "http://127.0.0.1:8080/v1"
+    base_url: str = "http://127.0.0.1:9931/v1"
     model: str = ""
     api_key: str | None = None
     timeout: float = 180.0
@@ -233,6 +233,22 @@ class MemoryCfg:
 
 
 @dataclass
+class CreativeCfg:
+    """Optional native creative tools exposed to the director model."""
+
+    enabled: bool = True
+    max_tool_calls: int = 4
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "CreativeCfg":
+        data = _as_dict(data)
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            max_tool_calls=max(1, min(12, _as_int(data.get("max_tool_calls"), 4))),
+        )
+
+
+@dataclass
 class Config:
     characters: list[Character] = field(default_factory=list)
     director: Endpoint = field(default_factory=Endpoint)
@@ -240,6 +256,7 @@ class Config:
     engine: EngineCfg = field(default_factory=EngineCfg)
     narration: NarrationCfg = field(default_factory=NarrationCfg)
     memory: MemoryCfg = field(default_factory=MemoryCfg)
+    creative: CreativeCfg = field(default_factory=CreativeCfg)
     data_dir: Path = field(default_factory=default_data_dir)
     load_error: str | None = field(default=None, init=False, repr=False, compare=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
@@ -256,6 +273,10 @@ class Config:
     @property
     def memory_dir(self) -> Path:
         return self.data_dir / "memory"
+
+    @property
+    def creative_dir(self) -> Path:
+        return self.data_dir / "creative"
 
     def scene_path(self, scene_id: str) -> Path:
         return self.scenes_dir / f"{scene_id}.jsonl"
@@ -290,6 +311,7 @@ class Config:
             "engine": asdict(self.engine),
             "narration": asdict(self.narration),
             "memory": asdict(self.memory),
+            "creative": asdict(self.creative),
         }
 
     def save(self) -> None:
@@ -319,6 +341,7 @@ class Config:
         cfg.engine = EngineCfg.from_dict(raw.get("engine"))
         cfg.narration = NarrationCfg.from_dict(raw.get("narration"))
         cfg.memory = MemoryCfg.from_dict(raw.get("memory"))
+        cfg.creative = CreativeCfg.from_dict(raw.get("creative"))
         return cfg
 
 

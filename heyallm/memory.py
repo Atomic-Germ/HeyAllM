@@ -16,9 +16,10 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from .config import Character, Endpoint, atomic_write
-from .llm import LLMClient, LLMError
+from .llm import LLMClient, LLMError, LLMResult
 from .transcript import Event
 
 log = logging.getLogger("heyallm.memory")
@@ -131,6 +132,7 @@ def compact(
     *,
     temperature: float = 0.4,
     max_tokens: int = 1400,
+    chat_fn: Callable[..., LLMResult] | None = None,
 ) -> str:
     """Fold `pending` into the chronicle. Returns the updated text.
 
@@ -153,7 +155,8 @@ def compact(
     )
 
     messages = [{"role": "user", "content": prompt}]
-    result = client.chat(
+    chat = chat_fn or client.chat
+    result = chat(
         endpoint,
         messages,
         temperature=temperature,
@@ -176,7 +179,7 @@ def compact(
                 ),
             }
         )
-        retry = client.chat(
+        retry = chat(
             endpoint, messages, temperature=temperature, max_tokens=max_tokens, timeout=(10, 240)
         )
         candidate = (retry.text or "").strip()

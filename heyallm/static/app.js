@@ -871,6 +871,7 @@ function charPanelHtml(i) {
 
 function directorPanelHtml() {
   const d = (state.config && state.config.director) || {};
+  const cr = (state.config && state.config.creative) || {};
   return `
     <p class="muted">The director fills character details, checks for natural scene endings, and compacts memory.</p>
     <div class="panel-grid">
@@ -878,7 +879,11 @@ function directorPanelHtml() {
       ${field("Model", textInput("model", d.model || ""))}
       ${field("API key", `<input type="password" data-f="api_key" value="${esc(d.api_key || "")}" autocomplete="new-password" placeholder="optional">`)}
       ${field("Timeout (s)", numInput("timeout", d.timeout ?? 180, "0.1"))}
-    </div>`;
+    </div>
+    <h3>Creative tools</h3>
+    <p class="muted">Optional meditate → insight → ponder tools for unexpected character and story ideas. Results are saved under the data directory.</p>
+    ${checkInput("creative_enabled", cr.enabled !== false, "Offer creative meditation tools to the director")}
+    ${field("Maximum tool calls per director request", numInput("creative_max_tool_calls", cr.max_tool_calls ?? 4))}`;
 }
 
 function pacingPanelHtml() {
@@ -1039,6 +1044,11 @@ function diffConfigPayload() {
       timeout: fnum(d.timeout, 180),
     });
     if (JSON.stringify(cfg.director || {}) !== JSON.stringify(director)) config.director = director;
+    const creative = {
+      enabled: !!d.creative_enabled,
+      max_tool_calls: inum(d.creative_max_tool_calls, 4),
+    };
+    if (JSON.stringify(cfg.creative || {}) !== JSON.stringify(creative)) config.creative = creative;
   }
 
   const p = panelValues("pacing");
@@ -1160,7 +1170,7 @@ function wireSettingsActions() {
     form.classList.toggle("hidden");
     if (!form.classList.contains("hidden")) {
       const seed = state.characters[0] && state.characters[0].endpoint;
-      $("#nc-base-url").value = (seed && seed.base_url) || "http://127.0.0.1:8080/v1";
+      $("#nc-base-url").value = (seed && seed.base_url) || "http://127.0.0.1:9931/v1";
       $("#nc-model").value = "";
       $("#nc-timeout").value = (seed && seed.timeout) || 180;
       $("#nc-seed").value = "";
@@ -1184,7 +1194,7 @@ function wireSettingsActions() {
           generate: true,
           prompt_extra: $("#nc-seed").value.trim(),
           endpoint: {
-            base_url: ($("#nc-base-url").value.trim() || "http://127.0.0.1:8080/v1").replace(/\/+$/, ""),
+            base_url: ($("#nc-base-url").value.trim() || "http://127.0.0.1:9931/v1").replace(/\/+$/, ""),
             model: $("#nc-model").value.trim(),
             timeout: fnum($("#nc-timeout").value, 180),
           },

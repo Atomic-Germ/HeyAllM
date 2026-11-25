@@ -9,6 +9,7 @@ from heyallm.config import (
     Character,
     Cooldown,
     Config,
+    CreativeCfg,
     Endpoint,
     EngineCfg,
     blank_character,
@@ -16,17 +17,17 @@ from heyallm.config import (
 
 
 def test_endpoint_urls():
-    ep = Endpoint(base_url="http://127.0.0.1:8080/v1/", model="m")
-    assert ep.chat_url() == "http://127.0.0.1:8080/v1/chat/completions"
-    assert ep.models_url() == "http://127.0.0.1:8080/v1/models"
+    ep = Endpoint(base_url="http://127.0.0.1:9931/v1/", model="m")
+    assert ep.chat_url() == "http://127.0.0.1:9931/v1/chat/completions"
+    assert ep.models_url() == "http://127.0.0.1:9931/v1/models"
 
 
 def test_endpoint_from_dict_defaults_and_trailing_slash():
     ep = Endpoint.from_dict({"base_url": "http://localhost:9000/v1/", "model": "  "})
     assert ep.base_url == "http://localhost:9000/v1"
     assert ep.model == ""  # blank falls back to server default
-    assert Endpoint.from_dict(None).base_url == "http://127.0.0.1:8080/v1"
-    assert Endpoint.from_dict({"base_url": "   "}).base_url == "http://127.0.0.1:8080/v1"
+    assert Endpoint.from_dict(None).base_url == "http://127.0.0.1:9931/v1"
+    assert Endpoint.from_dict({"base_url": "   "}).base_url == "http://127.0.0.1:9931/v1"
 
 
 def test_cooldown_bounds_reading_speed():
@@ -66,6 +67,7 @@ def test_config_round_trip(tmp_path: Path):
     cfg.engine.max_turns = 7
     cfg.narration.prefix = "[[nar]]"
     cfg.memory.compact_at_events = 5
+    cfg.creative = CreativeCfg(enabled=False, max_tool_calls=6)
     cfg.save()
 
     again = Config.load(tmp_path)
@@ -80,6 +82,15 @@ def test_config_round_trip(tmp_path: Path):
     assert again.engine.max_turns == 7
     assert again.narration.prefix == "[[nar]]"
     assert again.memory.compact_at_events == 5
+    assert again.creative.enabled is False
+    assert again.creative.max_tool_calls == 6
+
+
+def test_creative_tool_config_is_bounded_and_enabled_by_default():
+    assert CreativeCfg().enabled is True
+    cfg = CreativeCfg.from_dict({"enabled": False, "max_tool_calls": 99})
+    assert cfg.enabled is False
+    assert cfg.max_tool_calls == 12
 
 
 def test_load_tolerates_a_corrupt_file(tmp_path: Path):

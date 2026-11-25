@@ -39,6 +39,28 @@ model name, optional API key, timeout. Point them at the same OpenAI-compatible
 server with different `model` values (llama.cpp routing mode) or at different
 servers entirely. Ollama, vLLM, LM Studio, and llama.cpp all work unchanged.
 
+## Creative director tools
+
+The director can optionally use a native Python port of the old
+`creative-thinking` meditation pipeline:
+
+1. `creative_meditate` collides scene context with seeded random fragments.
+2. `creative_insight` extracts themes from a meditation.
+3. `creative_ponder` asks the director for a deeper reflection on an insight.
+
+These tools are available during character creation, narration, and memory
+compaction. They are inspirations, not facts; only the director's final output
+enters the scene. Tool calls and results stay inside the director request and
+are never streamed to characters.
+
+The feature is enabled by default and can be disabled under **Settings →
+Director** for endpoints without function-calling support. Each director
+request has a bounded tool-call budget. Results persist under
+`creative/state.json` for character creation and
+`creative/scenes/<id>/state.json` for scene work, so state is isolated between
+scenes and survives restarts. The Heritage Library, embeddings, and background
+daemon are not included in this integration.
+
 ## How the scene works
 
 - **Each character sees the other as the human user.** Its own past lines are
@@ -67,6 +89,8 @@ Everything lives under the data directory (default `~/.local/share/heyallm`):
 - `scenes/<id>.jsonl` — the full event log
 - `scenes/<id>.meta.json` — scene metadata
 - `memory/<id>.json` — the compacted chronicle
+- `creative/state.json` — director creative state for character creation
+- `creative/scenes/<id>/state.json` — scene-scoped meditations, insights, and ponderings
 
 If `config.json` cannot be read, the app refuses to start rather than
 replacing it with defaults. Scene statuses are reconciled on startup, so a
@@ -79,8 +103,8 @@ python -m pip install -e ".[test]"
 pytest
 ```
 
-Tests use a fake LLM client and never touch the network. The HTTP layer is
-exercised end-to-end against the real server in `tests/test_server.py`.
+Model behavior uses a fake LLM client. HTTP and transport tests use loopback
+servers only and never contact external services.
 
 ## Layout
 
@@ -88,7 +112,8 @@ exercised end-to-end against the real server in `tests/test_server.py`.
 heyallm/
   config.py        endpoints, characters, pacing, engine config
   llm.py           OpenAI-compatible client with retry + SSE
-  director.py      third model: creates characters, narrates
+  director.py      third model: creates characters, narrates, runs tools
+  creative.py      native meditation, insight, and pondering tools
   prompts.py       per-character system prompt and role mapping
   transcript.py    append-only JSONL event log
   memory.py        third-person compaction

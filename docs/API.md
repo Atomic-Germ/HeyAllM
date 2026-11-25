@@ -9,7 +9,7 @@ Everything the UI needs to boot in one call.
 
 ```json
 {
-  "config": { "version": 1, "director": {...}, "cooldown": {...}, "engine": {...}, "narration": {...}, "memory": {...} },
+  "config": { "version": 1, "director": {...}, "cooldown": {...}, "engine": {...}, "narration": {...}, "memory": {...}, "creative": { "enabled": true, "max_tool_calls": 4 } },
   "characters": [ Character ],
   "scenes": [ SceneSummary ],
   "active_scene": "scene-abc" | null,
@@ -29,7 +29,7 @@ Everything the UI needs to boot in one call.
   "demographics": { "age": "29", "gender": "she/her", "occupation": "night-shift radio operator", "location": "a coastal town", "appearance": "...", "mannerisms": "...", "speech_style": "...", "history": "...", "wants": "..." },
   "persona": "director-written paragraph(s) used as the body of the system prompt",
   "prompt_extra": "human seed, may be empty",
-  "endpoint": { "base_url": "http://127.0.0.1:8080/v1", "model": "qwen2.5-7b-instruct", "api_key": null, "timeout": 180 },
+  "endpoint": { "base_url": "http://127.0.0.1:9931/v1", "model": "qwen2.5-7b-instruct", "api_key": null, "timeout": 180 },
   "created_at": "2026-11-23T11:00:00"
 }
 ```
@@ -90,7 +90,11 @@ Everything the UI needs to boot in one call.
   event (works while running or stopped). Response `{ "event": Event }`.
 - `POST /api/scenes/<id>/narrate` — body `{ "hint": "..." }` (optional) → the
   director writes one narrative beat and appends it as a `narration` event.
-  Response `{ "event": Event }`. Works while running or stopped.
+  Response `{ "event": Event }`. Works while running or stopped. When
+  `config.creative.enabled` is true, the director may call the local
+  `creative_meditate`, `creative_insight`, and `creative_ponder` tools first.
+  Those protocol messages are private to the director request; only the final
+  narrative beat is persisted and broadcast.
 - `POST /api/scenes/<id>/start` → `{ "running": true }`. Starts at most one
   scene at a time. If another scene has an in-flight request that has not
   stopped yet, the response is `409` with an error message.
@@ -129,6 +133,23 @@ subscriber fell behind; the client reopens the stream and rebuilds from scene
 history. It also refetches history after a dropped connection, because SSE does
 not replay missed frames.
 
+### Director creative-tool configuration
+
+`POST /api/config` (or `PUT /api/config`) accepts:
+
+```json
+{
+  "config": {
+    "creative": { "enabled": true, "max_tool_calls": 4 }
+  }
+}
+```
+
+`max_tool_calls` is clamped to 1–12. The tools are offered to the director for
+character creation, narration, and compaction, never to player characters.
+Creative state is scene-scoped for narration and compaction and is removed when
+the scene is deleted.
+
 ## UI requirements
 
 The screen should read as a **messaging app**: scene list sidebar, header with
@@ -146,6 +167,6 @@ both characters' avatars/names, message stream, composer at the bottom.
 - Composer: textarea + send button → `POST /api/scenes/<id>/events`.
 - Controls: Start / Stop, Step, Compact memory, New scene, Settings.
 - Settings modal edits both characters (endpoint, model, api key, screenname,
-  real name, demographics, persona), the director endpoint, and cooldown /
-  engine numbers, then `PUT`s them back.
+  real name, demographics, persona), the director endpoint and creative-tool
+  toggle/budget, and cooldown / engine numbers, then `PUT`s them back.
 - No frameworks — vanilla HTML/CSS/JS, served from `/static/`.

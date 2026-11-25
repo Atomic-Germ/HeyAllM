@@ -12,7 +12,8 @@ import time
 from typing import Any
 
 from .config import Character, DEMOGRAPHIC_FIELDS, Endpoint
-from .llm import LLMClient, LLMError
+from .creative import CREATIVE_TOOLS, CreativeToolbox
+from .llm import LLMClient, LLMError, LLMResult
 
 log = logging.getLogger("heyallm.director")
 
@@ -53,6 +54,19 @@ Rules:
 - screenname must not be their real name. Real people use handles.
 """
 
+CREATIVE_GUIDANCE = """\
+You have optional creative meditation tools. Use creative_meditate when an
+unexpected image would help, creative_insight to extract its themes, and
+creative_ponder for a deeper second pass when useful. They are inspirations,
+not facts. Do not mention tool names or tool machinery in your final answer.
+"""
+
+PONDER_SYSTEM = """\
+You are a philosophical contemplator reflecting on a creative insight from a
+scene. Find a surprising but grounded connection, ask one useful question, and
+keep the reflection concise. Do not mention tools or systems.
+"""
+
 SEED_TEMPLATE = """\
 Create a character.
 
@@ -84,12 +98,120 @@ def _extract_json(raw: str) -> dict[str, Any]:
     return data
 
 
+def _tool_arguments(call: dict) -> dict:
+    function = call.get("function")
+    if not isinstance(function, dict):
+        raise ValueError("Malformed tool call")
+    raw = function.get("arguments", {})
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Tool arguments must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Tool arguments must be a JSON object")
+    return parsed
+
+
+def _director_reflection(client: LLMClient, endpoint: Endpoint, source: str) -> str:
+    result = client.chat(
+        endpoint,
+        [
+            {"role": "system", "content": PONDER_SYSTEM},
+            {"role": "user", "content": source},
+        ],
+        temperature=0.65,
+        max_tokens=600,
+        timeout=(10, 120),
+    )
+    return result.text
+
+
+def complete(
+    client: LLMClient,
+    endpoint: Endpoint,
+    messages: list[dict],
+    *,
+    creative: CreativeToolbox | None = None,
+    max_tool_calls: int = 4,
+    temperature: float = 0.9,
+    max_tokens: int = 420,
+    timeout: float | tuple[float, float] | None = None,
+) -> LLMResult:
+    """Run a director completion, including an optional bounded tool loop."""
+    if creative is None:
+        return client.chat(
+            endpoint, messages,
+            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        )
+    if max_tool_calls < 1:
+        raise ValueError("max_tool_calls must be at least 1")
+
+    conversation = [dict(message) for message in messages]
+    guidance = {"role": "system", "content": CREATIVE_GUIDANCE}
+    if conversation and conversation[0].get("role") == "system":
+        conversation[0]["content"] = str(conversation[0].get("content") or "") + "\n" + CREATIVE_GUIDANCE
+    else:
+        conversation.insert(0, guidance)
+
+    calls_made = 0
+    while True:
+        result = client.chat(
+            endpoint,
+            conversation,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=CREATIVE_TOOLS,
+            timeout=timeout,
+        )
+        if not result.tool_calls:
+            return result
+        if calls_made >= max_tool_calls:
+            raise LLMError(f"Director exceeded the {max_tool_calls}-call creative tool limit")
+
+        conversation.append({
+            "role": "assistant",
+            "content": result.text or "",
+            "tool_calls": result.tool_calls,
+        })
+        for index, call in enumerate(result.tool_calls):
+            if calls_made >= max_tool_calls:
+                raise LLMError(f"Director exceeded the {max_tool_calls}-call creative tool limit")
+            calls_made += 1
+            call = call if isinstance(call, dict) else {}
+            function = call.get("function")
+            function = function if isinstance(function, dict) else {}
+            name = str(function.get("name") or call.get("name") or "")
+            call_id = str(call.get("id") or f"creative-{calls_made}-{index}")
+            try:
+                args = _tool_arguments(call)
+                output = creative.call(
+                    name,
+                    args,
+                    ponder=lambda source: _director_reflection(client, endpoint, source),
+                )
+            except Exception as exc:  # noqa: BLE001 - return tool errors to the model
+                log.warning("Creative tool %s failed: %s", name or "(unknown)", exc)
+                output = {"error": str(exc)}
+            conversation.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": json.dumps(output, ensure_ascii=False),
+            })
+
+
 def create_character(
     client: LLMClient,
     endpoint: Endpoint,
     *,
     seed: str = "",
     character_endpoint: Endpoint | None = None,
+    creative: CreativeToolbox | None = None,
+    max_tool_calls: int = 4,
 ) -> dict:
     """Ask the director for a full character description.
 
@@ -101,12 +223,15 @@ def create_character(
         base_url=ce.base_url,
         model=ce.model or "(whatever the server has loaded)",
     )
-    result = client.chat(
+    result = complete(
+        client,
         endpoint,
         [
             {"role": "system", "content": CREATION_SYSTEM},
             {"role": "user", "content": prompt},
         ],
+        creative=creative,
+        max_tool_calls=max_tool_calls,
         temperature=1.0,
         max_tokens=1200,
         timeout=(10, 240),

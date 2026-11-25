@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from heyallm.server import App, STATIC_DIR, serve
+from heyallm.server import App, STATIC_DIR, SceneBusyError, serve
 
 
 @pytest.fixture
@@ -47,6 +47,16 @@ def request(app, method: str, path: str, body=None, expect: int = 200):
     parsed = json.loads(payload) if payload else {}
     assert status == expect, f"{method} {path} -> {status}: {payload[:300]!r}"
     return parsed
+
+
+def creative_tool_call(name, args, call_id="creative-1"):
+    from heyallm.llm import LLMResult
+
+    return LLMResult(text="", tool_calls=[{
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }])
 
 
 # --------------------------------------------------------------------- basics
@@ -168,6 +178,7 @@ def test_config_updates(server):
             "narration.prefix": "ignored",
             "narration": {"prefix": "[[world]]"},
             "memory": {"auto_compact": False},
+            "creative": {"enabled": True, "max_tool_calls": 6},
         }
     })["config"]
 
@@ -176,6 +187,7 @@ def test_config_updates(server):
     assert saved["engine"]["max_turns"] == 9
     assert saved["narration"]["prefix"] == "[[world]]"
     assert saved["memory"]["auto_compact"] is False
+    assert saved["creative"] == {"enabled": True, "max_tool_calls": 6}
 
 
 # -------------------------------------------------------------------- scenes
@@ -244,7 +256,7 @@ def test_director_narrates_as_narrative(server, app):
     assert event["kind"] == "narration"
     assert event["character_id"] is None
     assert event["text"] == "The rain finds a way under the door."
-    prompt = app.llm.calls[0]["messages"][0]["content"]
+    prompt = "\n".join(m["content"] for m in app.llm.calls[0]["messages"])
     assert "narrator of a scene" in prompt
     assert "Scene:" in prompt   # scene heading reaches the director
 
@@ -264,7 +276,7 @@ def test_director_narrates_with_a_hint(server, app):
     request(server, "POST", f"/api/scenes/{scene['id']}/narrate",
             {"hint": "something outside the window"}, expect=201)
 
-    prompt = app.llm.calls[0]["messages"][0]["content"]
+    prompt = "\n".join(m["content"] for m in app.llm.calls[0]["messages"])
     assert "something outside the window" in prompt
 
 
@@ -278,6 +290,106 @@ def test_director_narrate_empty_response_is_502(server, app):
     app.llm = FakeLLM(["   "])
 
     request(server, "POST", f"/api/scenes/{scene['id']}/narrate", {}, expect=502)
+
+
+def test_character_creation_can_use_creative_tools(server, app):
+    from fakes import FakeLLM
+
+    app.llm = FakeLLM([
+        creative_tool_call("creative_meditate", {"context_words": ["radio"], "seed": "new-char"}),
+        json.dumps({
+            "screenname": "nightwatch", "real_name": "Mara Ellison",
+            "demographics": {"age": "29"}, "persona": "You listen before you speak.",
+        }),
+    ])
+
+    created = request(server, "POST", "/api/characters", {
+        "generate": True, "endpoint": {"model": "player"},
+    }, expect=201)["character"]
+
+    assert created["screenname"] == "nightwatch"
+    assert len(app.llm.calls) == 2
+    assert (app.config.creative_dir / "state.json").exists()
+
+
+def test_narration_uses_scene_scoped_creative_tools_without_leaking_tool_output(server, app):
+    from fakes import FakeLLM
+
+    scene = request(
+        server, "POST", "/api/scenes",
+        {"character_ids": ["char-alice", "char-bob"]}, expect=201,
+    )["scene"]
+    app.llm = FakeLLM([
+        creative_tool_call("creative_meditate", {"context_words": ["fog"], "seed": "scene"}),
+        "Fog folds itself around the harbor wall.",
+    ])
+
+    event = request(server, "POST", f"/api/scenes/{scene['id']}/narrate", {}, expect=201)["event"]
+
+    assert event["kind"] == "narration"
+    assert event["text"] == "Fog folds itself around the harbor wall."
+    detail = request(server, "GET", f"/api/scenes/{scene['id']}")
+    assert len(detail["events"]) == 2  # scene opener + final narration, no tool frames
+    assert all("creative_meditate" not in item["text"] for item in detail["events"])
+    assert (app._creative_path(scene["id"]) / "state.json").exists()
+
+
+def test_creative_tools_can_be_disabled_for_director_requests(server, app):
+    from fakes import FakeLLM
+
+    app.config.creative.enabled = False
+    scene = request(
+        server, "POST", "/api/scenes",
+        {"character_ids": ["char-alice", "char-bob"]}, expect=201,
+    )["scene"]
+    app.llm = FakeLLM(["Rain ticks against the glass."])
+
+    request(server, "POST", f"/api/scenes/{scene['id']}/narrate", {}, expect=201)
+
+    assert "tools" not in app.llm.calls[0]
+
+
+def test_scene_creative_state_is_isolated_and_deleted_with_scene(server, app):
+    first = request(
+        server, "POST", "/api/scenes",
+        {"character_ids": ["char-alice", "char-bob"]}, expect=201,
+    )["scene"]
+    second = request(
+        server, "POST", "/api/scenes",
+        {"character_ids": ["char-bob", "char-alice"]}, expect=201,
+    )["scene"]
+    first_tools = app._creative_for(first["id"])
+    second_tools = app._creative_for(second["id"])
+    first_tools.call("creative_meditate", {"seed": "first"})
+
+    with pytest.raises(ValueError, match="creative_meditate"):
+        second_tools.call("creative_insight", {})
+    second_tools.call("creative_meditate", {"seed": "second"})
+
+    request(server, "DELETE", f"/api/scenes/{first['id']}")
+    assert not app._creative_path(first["id"]).exists()
+    assert app._creative_path(second["id"]).exists()
+
+
+def test_compaction_can_use_scene_scoped_creative_tools(server, app):
+    from fakes import FakeLLM
+
+    scene = request(
+        server, "POST", "/api/scenes",
+        {"character_ids": ["char-alice", "char-bob"]}, expect=201,
+    )["scene"]
+    request(server, "POST", f"/api/scenes/{scene['id']}/events",
+            {"text": "The storm lifts."}, expect=201)
+    app.llm = FakeLLM([
+        creative_tool_call("creative_meditate", {"context_words": ["calm"], "seed": "memory"}),
+        "Mara waited out the storm. Grey stayed below.",
+    ])
+
+    result = request(server, "POST", f"/api/scenes/{scene['id']}/compact")
+
+    assert result["memory"] == "Mara waited out the storm. Grey stayed below."
+    assert len(app.llm.calls) == 2
+    assert (app._creative_path(scene["id"]) / "state.json").exists()
 
 
 def test_empty_narration_is_rejected(server):
@@ -456,7 +568,9 @@ def test_compaction_does_not_mark_events_appended_during_request(server, app):
     app.compact_scene(scene["id"])
     chronicle = Chronicle.load(app.config.record_path(scene["id"]))
     assert chronicle.compacted_upto == 3
-    assert "A door opens." in app.llm.calls[1]["messages"][0]["content"]
+    assert "A door opens." in "\n".join(
+        m["content"] for m in app.llm.calls[1]["messages"]
+    )
 
 
 def test_malformed_json_is_a_400(server):
